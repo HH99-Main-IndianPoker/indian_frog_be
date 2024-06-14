@@ -19,6 +19,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 @Tag(name = "게임 종료 후 유저 선택 서비스 클래스", description = "게임 종료 후 유저의 선택에 따라 서비스를 수행하는 로직")
 @Slf4j
@@ -32,6 +33,7 @@ public class GameSessionService {
     @PersistenceContext
     private EntityManager em;
 
+    private final ConcurrentMap<Long, ConcurrentMap<String, String>> gameChoices = new ConcurrentHashMap<>();
 
     public GameSessionService(GameValidator gameValidator, MeterRegistry registry) {
         this.gameValidator = gameValidator;
@@ -39,35 +41,40 @@ public class GameSessionService {
         this.totalUserChoiceTimer = registry.timer("totalChoice.time");
     }
 
-    private final Map<Long, Map<String, String>> gameChoices = new ConcurrentHashMap<>();
-
     @Transactional
     public Object processUserChoices(Long gameRoomId, UserChoices choices) {
         return totalUserChoiceTimer.record(() -> {
-            /* 입력 값 검증*/
             log.info("Processing user choices for gameRoomId={} with nickname={}", gameRoomId, choices.getNickname());
+
             GameRoom gameRoom = em.find(GameRoom.class, gameRoomId, LockModeType.PESSIMISTIC_READ);
             User player = gameValidator.findUserByNickname(choices.getNickname());
             String nickname = player.getNickname();
             String choice = choices.getUserChoice().toString();
+
             log.debug("User choice received: gameRoomId={}, nickname={}, choice={}", gameRoomId, nickname, choice);
 
-            /* 유저 선택 저장*/
-            Timer.Sample saveChoiceTimer = Timer.start(registry);
-            gameChoices.computeIfAbsent(gameRoomId, k -> new ConcurrentHashMap<>()).put(nickname, choice);
-            saveChoiceTimer.stop(registry.timer("saveChoice.time"));
-            log.debug("Current game choices: {}", gameChoices.get(gameRoomId));
+            saveUserChoice(gameRoomId, nickname, choice);
 
-            /* 모든 유저의 선택이 완료되었는지 확인*/
-            if (gameChoices.get(gameRoomId).size() == 2) {
-                GameStatus status = new GameStatus(gameRoomId, nickname, determineActionAndProceed(gameRoomId));
+            if (areAllChoicesIn(gameRoomId)) {
+                GameState nextState = determineActionAndProceed(gameRoomId);
                 log.info("All user choices received for gameRoomId={}, proceeding with action", gameRoomId);
-                return status;
+                return new GameStatus(gameRoomId, nickname, nextState);
             }
 
             log.info("Waiting for other player's choices in gameRoomId={}", gameRoomId);
             return "다른 플레이어의 선택을 기다려주세요";
         });
+    }
+
+    private void saveUserChoice(Long gameRoomId, String nickname, String choice) {
+        Timer.Sample saveChoiceTimer = Timer.start(registry);
+        gameChoices.computeIfAbsent(gameRoomId, k -> new ConcurrentHashMap<>()).put(nickname, choice);
+        saveChoiceTimer.stop(registry.timer("saveChoice.time"));
+        log.debug("Current game choices: {}", gameChoices.get(gameRoomId));
+    }
+
+    private boolean areAllChoicesIn(Long gameRoomId) {
+        return gameChoices.get(gameRoomId).size() == 2;
     }
 
     private GameState determineActionAndProceed(Long gameRoomId) {
@@ -89,3 +96,4 @@ public class GameSessionService {
         }
     }
 }
+

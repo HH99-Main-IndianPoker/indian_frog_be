@@ -25,5 +25,7 @@ public class GameTurnService {
         return gameTurns.get(gameId);
     }
 
-
+    public void removeTurn(Long gameId) {
+        gameTurns.remove(gameId);
+    }
 }

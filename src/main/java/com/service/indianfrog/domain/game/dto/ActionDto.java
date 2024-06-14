@@ -30,6 +30,4 @@ public class ActionDto {
         this.myPoint = myPoint;
         this.otherPoint = otherPoint;
     }
-
-
 }

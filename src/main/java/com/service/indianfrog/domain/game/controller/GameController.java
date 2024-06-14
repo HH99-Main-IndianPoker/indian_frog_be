@@ -4,6 +4,7 @@ import com.service.indianfrog.domain.game.dto.ActionDto;
 import com.service.indianfrog.domain.game.dto.GameRequestDto.*;
 import com.service.indianfrog.domain.game.dto.GameResponseDto.*;
 import com.service.indianfrog.domain.game.service.*;
+import com.service.indianfrog.domain.game.utils.ConcurrencyControlService;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.messaging.handler.annotation.DestinationVariable;
@@ -25,16 +26,19 @@ public class GameController {
     private final EndGameService endGameService;
     private final ReadyService readyService;
     private final SendUserMessageService sendUserMessageService;
+    private final ConcurrencyControlService concurrencyControlService;
 
     public GameController(SimpMessageSendingOperations messagingTemplate,
                           StartGameService startGameService, GamePlayService gamePlayService,
-                          EndGameService endGameService, ReadyService readyService, SendUserMessageService sendUserMessageService) {
+                          EndGameService endGameService, ReadyService readyService,
+                          SendUserMessageService sendUserMessageService, ConcurrencyControlService concurrencyControlService) {
         this.messagingTemplate = messagingTemplate;
         this.startGameService = startGameService;
         this.gamePlayService = gamePlayService;
         this.endGameService = endGameService;
         this.readyService = readyService;
         this.sendUserMessageService = sendUserMessageService;
+        this.concurrencyControlService = concurrencyControlService;
     }
 
     /* pub 사용 게임 준비 */
@@ -53,27 +57,33 @@ public class GameController {
 
         log.info("gameState -> {}", gameState);
 
-        switch (gameState) {
-            case "START" -> {
-                StartRoundResponse response = startGameService.startRound(gameRoomId, principal.getName());
-                sendUserMessageService.sendUserGameMessage(response, principal); // 유저별 메시지 전송
+        if (concurrencyControlService.tryAcquireLock(gameRoomId, principal.getName())) {
+            try {
+                switch (gameState) {
+                    case "START" -> {
+                        StartRoundResponse response = startGameService.startRound(gameRoomId, principal.getName());
+                        sendUserMessageService.sendUserGameMessage(response, principal); // 유저별 메시지 전송
+                    }
+                    case "ACTION" -> {
+                        ActionDto response = gamePlayService.playerAction(gameRoomId, gameBetting, gameBetting.action());
+                        String destination = "/topic/gameRoom/" + gameRoomId;
+                        messagingTemplate.convertAndSend(destination, response);
+                    }
+                    case "END" -> {
+                        EndRoundResponse response = endGameService.endRound(gameRoomId, principal.getName());
+                        sendUserMessageService.sendUserEndRoundMessage(response, principal);
+                    }
+                    case "GAME_END" -> {
+                        EndGameResponse response = endGameService.endGame(gameRoomId, principal.getName());
+                        sendUserMessageService.sendUserEndGameMessage(response, principal);
+                    }
+                    default -> throw new IllegalStateException("Invalid game state: " + gameState);
+                }
+            } finally {
+                concurrencyControlService.releaseLock(gameRoomId, principal.getName());
             }
-            case "ACTION" -> {
-                ActionDto response = gamePlayService.playerAction(gameRoomId, gameBetting, gameBetting.action());
-                String destination = "/topic/gameRoom/" + gameRoomId;
-                messagingTemplate.convertAndSend(destination, response);
-            }
-            case "END" -> {
-                EndRoundResponse response = endGameService.endRound(gameRoomId, principal.getName());
-                sendUserMessageService.sendUserEndRoundMessage(response, principal);
-            }
-            case "GAME_END" -> {
-                EndGameResponse response = endGameService.endGame(gameRoomId, principal.getName());
-                sendUserMessageService.sendUserEndGameMessage(response, principal);
-            }
-
-            default -> throw new IllegalStateException("Invalid game state: " + gameState);
+        } else {
+            log.warn("동시성 제어 - 다른 요청이 처리 중입니다.");
         }
     }
-
 }

@@ -50,19 +50,9 @@ public class GamePlayService {
             Game game = gameRoom.getCurrentGame();
             User user = gameValidator.findUserByNickname(gameBetting.nickname());
             Turn turn = gameTurnService.getTurn(game.getId());
-            User otherUser = null;
+            User otherUser = getOtherUser(game, user);
 
-            if (user.equals(game.getPlayerTwo())) {
-                otherUser = game.getPlayerOne();
-            } else if (user.equals(game.getPlayerOne())){
-                otherUser = game.getPlayerTwo();
-            }
-
-            /* 유저의 턴이 맞는지 확인*/
-            if (!turn.getCurrentPlayer().equals(user.getNickname())) {
-                log.warn("It's not the turn of the user: {}", gameBetting.nickname());
-                throw new IllegalStateException("당신의 턴이 아닙니다, 선턴 유저의 행동이 끝날 때까지 기다려 주세요.");
-            }
+            validateUserTurn(turn, user);
 
             log.info("Performing {} action for user {}", action, gameBetting.nickname());
             Betting betting = Betting.valueOf(action.toUpperCase());
@@ -81,11 +71,7 @@ public class GamePlayService {
         log.info("Check action: currentPlayer={}, user={}, currentPot={}, betAmount={}",
                 user.getNickname(), user.getEmail(), game.getPot(), game.getBetAmount());
 
-        if (game.isCheckStatus()) {
-            return gameEnd(user, game, otherUser);
-        }
-
-        if(game.isRaiseStatus()){
+        if (game.isCheckStatus() || game.isRaiseStatus()) {
             return gameEnd(user, game, otherUser);
         }
 
@@ -94,20 +80,10 @@ public class GamePlayService {
         game.updatePot(game.getBetAmount());
         game.updateCheck();
         turn.nextTurn();
-        log.info("First turn check completed, moving to next turn " + turn.getCurrentPlayer());
+        log.info("First turn check completed, moving to next turn {}", turn.getCurrentPlayer());
 
         checkTimer.stop(registry.timer("playCheck.time"));
-        return ActionDto.builder()
-                .nowState(GameState.ACTION)
-                .nextState(GameState.ACTION)
-                .actionType(Betting.CHECK)
-                .nowBet(game.getBetAmount())
-                .pot(game.getPot())
-                .currentPlayer(turn.getCurrentPlayer())
-                .previousPlayer(user.getNickname())
-                .myPoint(user.getPoints())
-                .otherPoint(otherUser.getPoints())
-                .build();
+        return buildActionDto(GameState.ACTION, Betting.CHECK, game, turn.getCurrentPlayer(), user, otherUser);
     }
 
     @Transactional
@@ -118,17 +94,7 @@ public class GamePlayService {
 
         if (userPoints <= 0) {
             log.info("User has insufficient points to raise");
-            return ActionDto.builder()
-                    .nowState(GameState.ACTION)
-                    .nextState(GameState.END)
-                    .actionType(Betting.RAISE)
-                    .nowBet(0)
-                    .pot(game.getPot())
-                    .currentPlayer(user.getNickname())
-                    .previousPlayer(user.getNickname())
-                    .myPoint(user.getPoints())
-                    .otherPoint(otherUser.getPoints())
-                    .build();
+            return buildActionDto(GameState.END, Betting.RAISE, game, turn.getCurrentPlayer(), user, otherUser);
         }
 
         if (userPoints - game.getBetAmount() <= 0 || userPoints < game.getBetAmount() + raiseAmount){
@@ -145,52 +111,25 @@ public class GamePlayService {
         log.info("Raise action completed: newPot={}, newBetAmount={}, afterRaisePoint={}", game.getPot(), game.getBetAmount(), user.getPoints());
 
         raiseTimer.stop(registry.timer("playRaise.time"));
-        return ActionDto.builder()
-                .nowState(GameState.ACTION)
-                .nextState(GameState.ACTION)
-                .actionType(Betting.RAISE)
-                .nowBet(game.getBetAmount())
-                .pot(game.getPot())
-                .currentPlayer(turn.getCurrentPlayer())
-                .previousPlayer(user.getNickname())
-                .myPoint(user.getPoints())
-                .otherPoint(otherUser.getPoints())
-                .build();
+        return buildActionDto(GameState.ACTION, Betting.RAISE, game, turn.getCurrentPlayer(), user, otherUser);
     }
 
     @Transactional
     public ActionDto performDieAction(Game game, User user, User otherUser) {
         Timer.Sample dieTimer = Timer.start(registry);
-        User playerOne = game.getPlayerOne();
-        User playerTwo = game.getPlayerTwo();
-        User winner = user.equals(playerOne) ? playerTwo : playerOne;
+        User winner = getOtherUser(game, user);
         log.info("Die action by user: {}, winner: {}", user.getNickname(), winner.getNickname());
 
         /* DIE 하지 않은 유저에게 Pot 이월*/
         int pot = game.getPot();
-        if (winner.equals(playerOne)) {
-            game.addPlayerOneRoundPoints(pot);
-        } else {
-            game.addPlayerTwoRoundPoints(pot);
-        }
-
+        transferPotToWinner(game, winner, pot);
         game.setFoldedUser(user);
         game.setBetAmount(0);
 
         log.info("Die action completed, game ended. Winner: {}", winner.getNickname());
 
         dieTimer.stop(registry.timer("playDie.time"));
-        return ActionDto.builder()
-                .nowState(GameState.ACTION)
-                .nextState(GameState.END)
-                .actionType(Betting.DIE)
-                .nowBet(game.getBetAmount())
-                .pot(game.getPot())
-                .currentPlayer(winner.getNickname())
-                .previousPlayer(game.getFoldedUser().getNickname())
-                .myPoint(user.getPoints())
-                .otherPoint(otherUser.getPoints())
-                .build();
+        return buildActionDto(GameState.END, Betting.DIE, game, winner.getNickname(), user, otherUser);
     }
 
     @Transactional
@@ -205,13 +144,36 @@ public class GamePlayService {
 
         gameRepository.save(game);
 
+        return buildActionDto(GameState.END, Betting.CHECK, game, user.getNickname(), user, otherUser);
+    }
+
+    private User getOtherUser(Game game, User user) {
+        return user.equals(game.getPlayerOne()) ? game.getPlayerTwo() : game.getPlayerOne();
+    }
+
+    private void validateUserTurn(Turn turn, User user) {
+        if (!turn.getCurrentPlayer().equals(user.getNickname())) {
+            log.warn("It's not the turn of the user: {}", user.getNickname());
+            throw new IllegalStateException("당신의 턴이 아닙니다, 선턴 유저의 행동이 끝날 때까지 기다려 주세요.");
+        }
+    }
+
+    private void transferPotToWinner(Game game, User winner, int pot) {
+        if (winner.equals(game.getPlayerOne())) {
+            game.addPlayerOneRoundPoints(pot);
+        } else {
+            game.addPlayerTwoRoundPoints(pot);
+        }
+    }
+
+    private ActionDto buildActionDto(GameState nextState, Betting actionType, Game game, String currentPlayer, User user, User otherUser) {
         return ActionDto.builder()
                 .nowState(GameState.ACTION)
-                .nextState(GameState.END)
-                .actionType(Betting.CHECK)
+                .nextState(nextState)
+                .actionType(actionType)
                 .nowBet(game.getBetAmount())
                 .pot(game.getPot())
-                .currentPlayer(user.getNickname())
+                .currentPlayer(currentPlayer)
                 .previousPlayer(user.getNickname())
                 .myPoint(user.getPoints())
                 .otherPoint(otherUser.getPoints())

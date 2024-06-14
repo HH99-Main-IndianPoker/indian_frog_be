@@ -21,63 +21,61 @@ public class SendUserMessageService {
     }
 
     public void sendUserEndRoundMessage(EndRoundResponse response, Principal principal) {
+        logUserInfo(principal);
+        log.info("Player's Card: {}", response.myCard());
 
-        log.info("who are you? -> {}", principal.getName());
-        log.info("player's Card : {}", response.myCard());
-
-        try {
-            messagingTemplate.convertAndSendToUser(principal.getName(), "/queue/endRoundInfo", new EndRoundInfo(
-                    response.nowState(),
-                    response.nextState(),
-                    response.round(),
-                    response.winner().getNickname(),
-                    response.loser().getNickname(),
-                    response.roundPot(),
-                    response.myCard(),
-                    response.otherCard(),
-                    response.winnerPoint(),
-                    response.loserPoint()));
-            log.info("Message sent successfully.");
-        } catch (Exception e) {
-            log.error("Failed to send message", e);
-        }
-
+        sendMessage(principal, "/queue/endRoundInfo", new EndRoundInfo(
+                response.nowState(),
+                response.nextState(),
+                response.round(),
+                response.winner().getNickname(),
+                response.loser().getNickname(),
+                response.roundPot(),
+                response.myCard(),
+                response.otherCard(),
+                response.winnerPoint(),
+                response.loserPoint()
+        ));
     }
 
     public void sendUserEndGameMessage(EndGameResponse response, Principal principal) {
+        logUserInfo(principal);
 
-        log.info("who are you? -> {}", principal.getName());
-
-        try {
-            messagingTemplate.convertAndSendToUser(principal.getName(), "/queue/endGameInfo", new EndGameInfo(
-                    response.nowState(),
-                    response.nextState(),
-                    response.gameWinner().getNickname(),
-                    response.gameLoser().getNickname(),
-                    response.winnerPot(),
-                    response.loserPot()));
-            log.info("Message sent successfully.");
-        } catch (Exception e) {
-            log.error("Failed to send message", e);
-        }
+        sendMessage(principal, "/queue/endGameInfo", new EndGameInfo(
+                response.nowState(),
+                response.nextState(),
+                response.gameWinner().getNickname(),
+                response.gameLoser().getNickname(),
+                response.winnerPot(),
+                response.loserPot()
+        ));
     }
 
     public void sendUserGameMessage(StartRoundResponse response, Principal principal) {
-        /* 각 Player 에게 상대 카드 정보와 턴 정보를 전송*/
-        log.info("who are you? -> {}", principal.getName());
-        log.info(response.gameState(), response.turn().toString());
+        logUserInfo(principal);
+        log.info("Game state: {}, Turn: {}", response.gameState(), response.turn().toString());
+
+        sendMessage(principal, "/queue/gameInfo", new GameInfo(
+                response.otherCard(),
+                response.turn(),
+                response.firstBet(),
+                response.roundPot(),
+                response.round(),
+                response.myPoint(),
+                response.otherPoint()
+        ));
+    }
+
+    private void logUserInfo(Principal principal) {
+        log.info("Who are you? -> {}", principal.getName());
+    }
+
+    private void sendMessage(Principal principal, String destination, Object message) {
         try {
-            messagingTemplate.convertAndSendToUser(principal.getName(), "/queue/gameInfo", new GameInfo(
-                    response.otherCard(),
-                    response.turn(),
-                    response.firstBet(),
-                    response.roundPot(),
-                    response.round(),
-                    response.myPoint(),
-                    response.otherPoint()));
-            log.info("Message sent successfully.");
+            messagingTemplate.convertAndSendToUser(principal.getName(), destination, message);
+            log.info("Message sent successfully to {}", principal.getName());
         } catch (Exception e) {
-            log.error("Failed to send message", e);
+            log.error("Failed to send message to {}", principal.getName(), e);
         }
     }
 }

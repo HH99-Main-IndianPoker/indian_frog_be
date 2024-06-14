@@ -40,32 +40,21 @@ public class StartGameService {
     @Transactional
     public StartRoundResponse startRound(Long gameRoomId, String email) {
         return totalRoundStartTimer.record(() -> {
-            log.info("게임룸 ID로 라운드 시작: {}", gameRoomId);
-            log.info("게임룸 검증 및 검색 중.");
+            log.info("게임룸 ID {}로 라운드 시작", gameRoomId);
+
             GameRoom gameRoom = em.find(GameRoom.class, gameRoomId, LockModeType.PESSIMISTIC_WRITE);
-            log.info("게임룸 검증 및 검색 완료.");
-
             gameRoom.updateGameState(GameState.START);
-            log.info("게임 상태를 START로 업데이트 함.");
 
-            log.info("게임 검색중.");
             Game game = gameRoom.getCurrentGame();
-            log.info("Game : {}", game.getId());
+            log.info("게임 ID: {}", game.getId());
 
             performRoundStartTimer.record(() -> performRoundStart(game));
-            Card card = email.equals(game.getPlayerOne().getEmail()) ? game.getPlayerTwoCard() : game.getPlayerOneCard();
+            Card card = getCardForPlayer(game, email);
 
-            log.info("라운드 시작 작업 수행 완료.");
             int round = game.getRound();
-
-            log.info("게임의 현재 턴 가져오는 중.");
             Turn turn = gameTurnService.getTurn(game.getId());
-            log.info("현재 턴 가져옴.");
-
-            int myPoint = email.equals(game.getPlayerOne().getEmail()) ? game.getPlayerOne().getPoints() : game.getPlayerTwo().getPoints();
-            int otherPoint = email.equals(game.getPlayerOne().getEmail()) ? game.getPlayerTwo().getPoints() : game.getPlayerOne().getPoints();
-
-            log.info("StartRoundResponse 반환 중.");
+            int myPoint = getPlayerPoints(game, email);
+            int otherPoint = getOpponentPoints(game, email);
 
             return new StartRoundResponse("ACTION", round, game.getPlayerOne(), game.getPlayerTwo(), card, turn, game.getBetAmount(), game.getPot(), myPoint, otherPoint);
         });
@@ -73,85 +62,84 @@ public class StartGameService {
 
     @Transactional
     public synchronized void performRoundStart(Game game) {
-        /* 라운드 수 저장, 라운드 베팅 금액 설정, 플레이어에게 카드 지급, 플레이어 턴 설정*/
-        log.info("게임 ID로 라운드 시작 작업 수행 중: {}", game.getId());
+        log.info("게임 ID {}로 라운드 시작 작업 수행 중", game.getId());
 
         if (!game.isRoundStarted()) {
             game.incrementRound();
             game.updateRoundStarted();
+            log.info("라운드 증가: {}", game.getRound());
         }
 
-        log.info("라운드가 {}로 증가됨.", game.getRound());
+        handleInitialBet(game);
+        handleCardAllocation(game);
 
-        User playerOne = game.getPlayerOne();
-        User playerTwo = game.getPlayerTwo();
+        if (game.getRound() == 1) {
+            initializeTurnForGame(game);
+            log.info("첫 라운드에 턴 초기화");
+        }
+    }
 
+    private int calculateInitialBet(User playerOne, User playerTwo) {
+        int minPoints = Math.min(playerOne.getPoints(), playerTwo.getPoints());
+        int bet = Math.max((int) Math.round(minPoints * 0.05), 1);
+        return Math.min(bet, 2000);
+    }
+
+    private Card getCardForPlayer(Game game, String email) {
+        return email.equals(game.getPlayerOne().getEmail()) ? game.getPlayerTwoCard() : game.getPlayerOneCard();
+    }
+
+    private int getPlayerPoints(Game game, String email) {
+        return email.equals(game.getPlayerOne().getEmail()) ? game.getPlayerOne().getPoints() : game.getPlayerTwo().getPoints();
+    }
+
+    private int getOpponentPoints(Game game, String email) {
+        return email.equals(game.getPlayerOne().getEmail()) ? game.getPlayerTwo().getPoints() : game.getPlayerOne().getPoints();
+    }
+
+    private void handleInitialBet(Game game) {
         if (game.getPot() == 0) {
             int betAmount = calculateInitialBet(game.getPlayerOne(), game.getPlayerTwo());
-            log.info("초기 배팅금액 {}로 설정됨.", betAmount);
+            log.info("초기 배팅금액: {}", betAmount);
 
-            playerOne.decreasePoints(betAmount);
-            playerTwo.decreasePoints(betAmount);
+            game.getPlayerOne().decreasePoints(betAmount);
+            game.getPlayerTwo().decreasePoints(betAmount);
 
             game.setBetAmount(0);
             game.updatePot(betAmount * 2);
         }
+    }
 
-        if (game.isCardAllocation() == false) {
+    private void handleCardAllocation(Game game) {
+        if (!game.isCardAllocation()) {
             List<Card> availableCards = prepareAvailableCards(game);
             Collections.shuffle(availableCards);
             assignRandomCardsToPlayers(game, availableCards);
 
-            log.info("플레이어에게 카드 할당됨.");
-            log.info("{} Card : {}", playerOne.getNickname(), game.getPlayerOneCard());
-            log.info("{} Card : {}", playerTwo.getNickname(), game.getPlayerTwoCard());
+            log.info("플레이어에게 카드 할당됨: {} - {}, {} - {}",
+                    game.getPlayerOne().getNickname(), game.getPlayerOneCard(), game.getPlayerTwo().getNickname(), game.getPlayerTwoCard());
 
             game.updateCardAllocation();
         }
-
-        if (game.getRound() == 1) {
-            initializeTurnForGame(game);
-            log.info("첫 라운드에 턴 초기화 됨.");
-        }
-    }
-
-    @Transactional
-    public int calculateInitialBet(User playerOne, User playerTwo) {
-        int playerOnePoints = playerOne.getPoints();
-        int playerTwoPoints = playerTwo.getPoints();
-        int minPoints = Math.min(playerOnePoints, playerTwoPoints);
-        int fivePercentOfMinPoint = (int) Math.round(minPoints * 0.05);
-        if (fivePercentOfMinPoint < 1) {
-            fivePercentOfMinPoint = 1;
-        }
-        return Math.min(fivePercentOfMinPoint, 2000);
     }
 
     private List<Card> prepareAvailableCards(Game game) {
-        /* 사용한 카드 목록과 전체 카드 목록을 가져옴
-         * 전체 카드 목록에서 사용한 카드 목록을 제외하고 남은 카드 목록을 반환한다*/
         Set<Card> usedCards = game.getUsedCards();
-        Set<Card> allCards = EnumSet.allOf(Card.class); // 성능 개선 여지 있음
+        Set<Card> allCards = EnumSet.allOf(Card.class);
         allCards.removeAll(usedCards);
         return new ArrayList<>(allCards);
     }
 
     private void assignRandomCardsToPlayers(Game game, List<Card> availableCards) {
-        Card playerOneCard = availableCards.get(0);
-        Card playerTwoCard = availableCards.get(1);
+        game.setPlayerOneCard(availableCards.get(0));
+        game.setPlayerTwoCard(availableCards.get(1));
 
-        game.setPlayerOneCard(playerOneCard);
-        game.setPlayerTwoCard(playerTwoCard);
-
-        game.addUsedCard(playerOneCard);
-        game.addUsedCard(playerTwoCard);
+        game.addUsedCard(availableCards.get(0));
+        game.addUsedCard(availableCards.get(1));
     }
 
     private void initializeTurnForGame(Game game) {
-        List<User> players = new ArrayList<>();
-        players.add(game.getPlayerOne());
-        players.add(game.getPlayerTwo());
-
+        List<User> players = List.of(game.getPlayerOne(), game.getPlayerTwo());
         Turn turn = new Turn(players);
         gameTurnService.setTurn(game.getId(), turn);
     }
